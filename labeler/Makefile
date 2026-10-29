@@ -46,12 +46,15 @@ deploy: push
 render:
 	$(if $(API_URL),,$(error API_URL is not set in local.env; copy the Function URL from the Lambda console))
 	mkdir -p build
+	cp web/index.html build/index.html
 	sed -e 's|__MAPTILER_API_KEY__|$(MAPTILER_API_KEY)|' -e 's|__API_URL__|$(API_URL)|' \
-		web/index.html > build/index.html
+		web/map.js > build/map.js
 
 site: render
 	aws s3 cp build/index.html s3://$(SITE_BUCKET)/index.html \
 		--content-type text/html --cache-control no-cache
+	aws s3 cp build/map.js s3://$(SITE_BUCKET)/map.js \
+		--content-type text/javascript --cache-control no-cache
 
 
 logs:

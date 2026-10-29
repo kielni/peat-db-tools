@@ -8,6 +8,7 @@ TOOLS = labeler
 lint:
 	uv run ruff format .
 	uv run ruff check .
+	npx prettier --write --log-level warn "**/*.{html,css,js}"
 
 test:
 	uv run pytest

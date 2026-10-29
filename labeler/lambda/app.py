@@ -31,8 +31,8 @@ def known_keys() -> frozenset[str]:
 
 
 def show_all_key() -> str:
-    """Return the key that loads every contributor's labels, or ''."""
-    return os.environ.get("SHOW_ALL_KEY", "") or ""
+    """Return the key that loads every contributor's labels, or unset."""
+    return os.environ.get("SHOW_ALL_KEY", "unset") or "unset"
 
 
 @cache
@@ -134,9 +134,7 @@ def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
         key = payload.get("key")
     except (ValueError, AttributeError):
         return response(400, {"error": "body must be a JSON object"})
-    if not isinstance(key, str) or not (
-        key in known_keys() or key == show_all_key()
-    ):
+    if not isinstance(key, str) or not (key in known_keys() or key == show_all_key()):
         return response(403, {"error": "invalid key"})
 
     name = payload.get("action", "save")

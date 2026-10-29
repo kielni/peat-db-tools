@@ -1,0 +1,8 @@
+{
+  "name": "peat-db-tools",
+  "private": true,
+  "description": "Node dev tools for peat-db-tools; Python tools are managed by uv",
+  "devDependencies": {
+    "prettier": "3.7.4"
+  }
+}

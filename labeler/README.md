@@ -35,7 +35,7 @@ Click **I'm done** when you finish a session. It records the time in the
 ```mermaid
 flowchart LR
     subgraph Browser
-        page["index.html<br/>(map, grid, labels)"]
+        page["index.html + map.js<br/>(map, grid, labels)"]
     end
     s3[(S3 website bucket)]
     maptiler[MapTiler<br/>imagery + place search]
@@ -53,7 +53,7 @@ flowchart LR
     lambda -- "done: write time" --> keys
 ```
 
-- **Page** ([web/index.html](web/index.html)): a single static file served from
+- **Page** ([web/index.html](web/index.html), [web/map.js](web/map.js)): static files served from
   S3. It computes the grid itself; a cell ID is `row_col` on the 7.5″ grid.
   Clicks queue labels; the page sends batches every 2.5 seconds,
   retrying on failure.
