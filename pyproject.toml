@@ -1,0 +1,24 @@
+[project]
+name = "peat-db-tools"
+version = "0.1.0"
+description = "Tools for building the peat database"
+requires-python = "==3.12.*"  # match the Lambda's python3.12 runtime
+# Runtime dependencies are also what the labeler's Lambda image installs (via uv export)
+dependencies = ["gspread>=6.2,<7"]
+
+[dependency-groups]
+dev = [
+    "pytest",
+    "ruff>=0.17.3",
+]
+
+[tool.uv]
+package = false
+
+[tool.ruff.lint]
+# pycodestyle errors and warnings plus pyflakes, matching the old flake8 setup
+select = ["E", "F", "W"]
+
+[tool.pytest.ini_options]
+pythonpath = ["labeler/lambda"]
+testpaths = ["labeler/tests"]

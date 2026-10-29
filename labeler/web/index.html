@@ -1,0 +1,235 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Peat labels</title>
+<link rel="stylesheet" href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css">
+<script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
+<style>
+  html, body { margin: 0; height: 100%; font: 14px/1.4 system-ui, sans-serif; }
+  #map { position: absolute; inset: 0; }
+  .box {
+    position: absolute; left: 10px; z-index: 1; background: #fff; color: #222;
+    border-radius: 6px; box-shadow: 0 1px 4px rgba(0, 0, 0, 0.3);
+  }
+  #panel { top: 10px; width: min(320px, calc(100% - 70px)); padding: 8px; }
+  #search { display: flex; gap: 4px; }
+  #search input { flex: 1; min-width: 0; padding: 6px; font: inherit; }
+  #search button { padding: 6px 10px; font: inherit; }
+  #results { list-style: none; margin: 6px 0 0; padding: 0; }
+  #results li { padding: 6px; border-top: 1px solid #eee; cursor: pointer; }
+  #results li:hover { background: #f2f2f2; }
+  #results li.empty { cursor: default; color: #777; }
+  #hint { margin-top: 6px; color: #555; }
+  #error { margin-top: 6px; color: #b00020; font-weight: 600; }
+  #status { bottom: 30px; padding: 4px 8px; }
+  #status.error { background: #fde2e2; }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<div id="map"></div>
+
+<div id="panel" class="box">
+  <form id="search">
+    <input id="query" type="search" placeholder="Search a place, e.g. San Jose, CA">
+    <button type="submit">Search</button>
+  </form>
+  <ul id="results"></ul>
+  <div id="hint"></div>
+  <div id="error" hidden></div>
+</div>
+
+<div id="status" class="box" hidden></div>
+
+<script>
+// Filled in by `make render`.
+const MAPTILER_KEY = "__MAPTILER_API_KEY__";
+const API_URL = "__API_URL__";
+
+// Grid: rows of equal latitude height,
+// each with its own longitude step so cells are about 250 m wide.
+const CELL_M = 250;
+const M_PER_DEG = 111320;
+const DLAT = CELL_M / M_PER_DEG;
+const MAX_LAT = 85;
+
+const GRID_MIN_ZOOM = 13;
+const SEARCH_ZOOM = 14;
+const FLUSH_MS = 2500;
+const MAX_GRID_CELLS = 20000;
+
+function rowFor(lat) { return Math.floor(lat / DLAT); }
+
+function dlonFor(row) {
+  const rowLat = (row + 0.5) * DLAT;
+  return CELL_M / (M_PER_DEG * Math.cos(rowLat * Math.PI / 180));
+}
+
+function cellPolygon(row, col) {
+  const dlon = dlonFor(row);
+  const [s, w, n, e] = [row * DLAT, col * dlon, (row + 1) * DLAT, (col + 1) * dlon];
+  return {
+    type: "Feature", properties: {},
+    geometry: { type: "Polygon", coordinates: [[[w, s], [e, s], [e, n], [w, n], [w, s]]] },
+  };
+}
+
+function collection(features) { return { type: "FeatureCollection", features }; }
+
+const KEY = new URLSearchParams(location.search).get("key");
+const marked = new Map(); // cell_id -> [row, col]
+const queue = []; // labels not yet saved
+
+const hint = document.getElementById("hint");
+const statusBox = document.getElementById("status");
+
+function setStatus(text, isError = false) {
+  statusBox.textContent = text;
+  statusBox.classList.toggle("error", isError);
+  statusBox.hidden = false;
+}
+
+if (!KEY) {
+  const error = document.getElementById("error");
+  error.textContent = "This page needs your personal link (…/?key=…).";
+  error.hidden = false;
+}
+
+const map = new maplibregl.Map({
+  container: "map",
+  style: `https://api.maptiler.com/maps/hybrid/style.json?key=${MAPTILER_KEY}`,
+  center: [0, 20],
+  zoom: 1.5,
+});
+map.addControl(new maplibregl.NavigationControl(), "top-right");
+
+map.on("load", () => {
+  map.addSource("grid", { type: "geojson", data: collection([]) });
+  map.addSource("marked", { type: "geojson", data: collection([]) });
+  map.addLayer({
+    id: "marked-fill", type: "fill", source: "marked", minzoom: GRID_MIN_ZOOM,
+    paint: { "fill-color": "#e4572e", "fill-opacity": 0.5 },
+  });
+  map.addLayer({
+    id: "grid-lines", type: "line", source: "grid", minzoom: GRID_MIN_ZOOM,
+    paint: { "line-color": "#ffffff", "line-opacity": 0.6, "line-width": 1 },
+  });
+  drawGrid();
+});
+map.on("moveend", drawGrid);
+map.on("click", toggleCell);
+
+function drawGrid() {
+  const zoomedIn = map.getZoom() >= GRID_MIN_ZOOM;
+  hint.textContent = zoomedIn
+    ? `Click a cell to mark it not peat; click again to undo. ${marked.size} marked.`
+    : "Search or zoom in to see the 250 m grid.";
+  map.getCanvas().style.cursor = zoomedIn && KEY ? "crosshair" : "";
+  if (!zoomedIn) return; // grid layer is hidden by minzoom
+
+  const bounds = map.getBounds();
+  const south = Math.max(bounds.getSouth(), -MAX_LAT);
+  const north = Math.min(bounds.getNorth(), MAX_LAT);
+  const features = [];
+  for (let row = rowFor(south); row <= rowFor(north); row++) {
+    const dlon = dlonFor(row);
+    const last = Math.floor(bounds.getEast() / dlon);
+    for (let col = Math.floor(bounds.getWest() / dlon); col <= last; col++) {
+      features.push(cellPolygon(row, col));
+      if (features.length > MAX_GRID_CELLS) return;
+    }
+  }
+  map.getSource("grid").setData(collection(features));
+}
+
+function toggleCell(event) {
+  if (!KEY || map.getZoom() < GRID_MIN_ZOOM) return;
+  const { lat, lng } = event.lngLat.wrap();
+  if (Math.abs(lat) > MAX_LAT) return;
+  const row = rowFor(lat);
+  const col = Math.floor(lng / dlonFor(row));
+  const id = `${row}_${col}`;
+  const label = marked.has(id) ? "unknown" : "not peat";
+  if (label === "unknown") marked.delete(id); else marked.set(id, [row, col]);
+  queue.push({
+    cell_id: id,
+    // cell center, rounded to 0.1 m
+    latitude: Number(((row + 0.5) * DLAT).toFixed(6)),
+    longitude: Number(((col + 0.5) * dlonFor(row)).toFixed(6)),
+    label,
+  });
+  map.getSource("marked").setData(
+    collection([...marked.values()].map(([r, c]) => cellPolygon(r, c))));
+  drawGrid();
+  setStatus("Saving…");
+}
+
+// Send queued labels every FLUSH_MS; on failure keep them and retry next time.
+let inFlight = false;
+let stopped = false;
+
+async function flush() {
+  if (stopped || inFlight || !queue.length) return;
+  inFlight = true;
+  const batch = queue.slice();
+  try {
+    const res = await fetch(API_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ key: KEY, rows: batch }),
+    });
+    if (res.status === 403) {
+      stopped = true;
+      setStatus("This link is not valid, so labels are not being saved.", true);
+      return;
+    }
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    queue.splice(0, batch.length);
+    setStatus(queue.length ? "Saving…" : "Saved ✓");
+  } catch (err) {
+    setStatus("Retrying…", true);
+    console.warn(err);
+  } finally {
+    inFlight = false;
+  }
+}
+setInterval(flush, FLUSH_MS);
+
+// Place search with the MapTiler Geocoding API.
+const results = document.getElementById("results");
+
+function addResult(text, onPick) {
+  const item = document.createElement("li");
+  item.textContent = text;
+  if (onPick) item.addEventListener("click", onPick); else item.className = "empty";
+  results.append(item);
+}
+
+document.getElementById("search").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const query = document.getElementById("query").value.trim();
+  results.replaceChildren();
+  if (!query) return;
+  const url = `https://api.maptiler.com/geocoding/${encodeURIComponent(query)}.json`
+    + `?key=${MAPTILER_KEY}&language=en&limit=5`;
+  try {
+    const res = await fetch(url);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    if (!data.features?.length) addResult("No matches");
+    for (const feature of data.features ?? []) {
+      addResult(feature.place_name, () => {
+        results.replaceChildren();
+        map.flyTo({ center: feature.center, zoom: SEARCH_ZOOM });
+      });
+    }
+  } catch (err) {
+    addResult("Search failed; try again.");
+    console.warn(err);
+  }
+});
+</script>
+</body>
+</html>

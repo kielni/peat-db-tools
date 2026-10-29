@@ -1,0 +1,10 @@
+local.env
+service-account.json
+build/
+labeler/lambda/keys.json
+labeler/lambda/requirements.txt
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+.venv/
+notes
