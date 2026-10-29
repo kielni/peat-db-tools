@@ -20,7 +20,7 @@ aws lambda create-function --function-name "$FUNCTION_NAME" \
     --package-type Image --code ImageUri="$image" --architectures arm64 \
     --role "arn:aws:iam::$account_id:role/lambda-with-s3" \
     --timeout 15 --memory-size 256 \
-    --environment "Variables={SHEET_ID=$SHEET_ID}" > /dev/null
+    --environment "Variables={SHEET_ID=$SHEET_ID,SHOW_ALL_KEY=${SHOW_ALL_KEY:-}}" > /dev/null
 aws lambda wait function-active-v2 --function-name "$FUNCTION_NAME"
 
 # Public function URL that only the site may call from a browser

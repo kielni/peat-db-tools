@@ -6,8 +6,8 @@ All tools share one Python stack: a single uv project (`pyproject.toml`, `uv.loc
 
 ## Tools
 
-- [labeler/](labeler/) — map page and Lambda function for labeling peat / not-peat
-  map cells, saved to a Google Sheet.
+- [labeler/](labeler/) — map page and Lambda function for labeling cells of a
+  7.5 arcsecond grid as peat / not peat, saved to a Google Sheet.
 
 ## Make
 
