@@ -40,6 +40,7 @@ flowchart LR
     s3[(S3 website bucket)]
     maptiler[MapTiler<br/>imagery + place search]
     lambda[Lambda function URL<br/>app.py]
+    slack[Slack channel<br/>incoming webhook]
     subgraph Sheet[Google Sheet]
         labels[labels tab]
         keys[keys tab]
@@ -51,6 +52,7 @@ flowchart LR
     lambda -- "save: append rows" --> labels
     lambda -- "load: read rows" --> labels
     lambda -- "done: write time" --> keys
+    lambda -- "done: post message" --> slack
 ```
 
 - **Page** ([web/index.html](web/index.html), [web/map.js](web/map.js)): static files served from
@@ -63,7 +65,10 @@ flowchart LR
     rows to the `labels` tab.
   - `load` — return the last label per (key, cell) in sheet order, for this
     key only.
-  - `done` — write the time to this key's `completed` column in `keys`.
+  - `done` — write the time to this key's `completed` column in `keys`, then
+    post the contributor's email and peat / not peat counts to Slack (see
+    [Slack notifications](#slack-notifications)). A Slack failure is logged
+    and doesn't fail the request.
 - **Google Sheet**: all storage. `labels` is append-only, so the latest row for
   a (key, cell) is that contributor's current label. Contributors cannot delete
   data.
@@ -84,6 +89,31 @@ from the repo root as `make labeler-TARGET`.
 - `make logs` — tail the Lambda's logs.
 - [scripts/aws_setup.sh](scripts/aws_setup.sh) — one-time creation of the
   function, its public URL, and the website bucket.
+
+### Slack notifications
+
+Clicking **I'm done** posts a message like
+`a@example.org finished labeling: 42 peat, 17 not peat`
+to a Slack channel. To set it up once:
+
+1. Go to <https://api.slack.com/apps>, choose **Create New App**, then
+   **From scratch**, and pick the workspace.
+2. In the setup wizard, add the `incoming-webhook` scope. Add no events.
+   Finish the wizard; if it offers to install the app, pick the channel and
+   choose **Allow**.
+3. On the app's settings page, open **Incoming Webhooks** and turn on
+   **Activate Incoming Webhooks**. If no URL is listed under **Webhook URLs
+   for Your Workspace**, choose **Add New Webhook** and pick the channel. To
+   post to a different channel later, add another webhook.
+4. Copy the webhook URL into `SLACK_WEBHOOK_URL` in `local.env`. It's a
+   secret: anyone who has it can post to the channel.
+   [scripts/aws_setup.sh](scripts/aws_setup.sh) sets it on a new function.
+   For an existing function, add it in the Lambda console under
+   **Configuration > Environment variables > Edit**.
+5. Click **I'm done** with a test key and check the channel, or `make logs`
+   if nothing arrives.
+
+Leave `SLACK_WEBHOOK_URL` empty to turn notifications off.
 
 ### Export labels
 

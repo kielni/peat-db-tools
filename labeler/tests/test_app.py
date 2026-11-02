@@ -1,7 +1,10 @@
 """Tests for the labels Lambda handler (Google Sheet mocked)."""
 
+import io
 import json
 import re
+import urllib.error
+import urllib.request
 from typing import Any
 
 import gspread
@@ -52,14 +55,23 @@ def sheets(monkeypatch: pytest.MonkeyPatch) -> dict[str, FakeWorksheet]:
             [
                 ["key", "email", "url", "created", "completed"],
                 ["other-key", "", "", "2026-10-26", ""],
-                ["good-key", "", "", "2026-10-26", ""],
+                ["good-key", "good@example.org", "", "2026-10-26", ""],
             ]
         ),
     }
     monkeypatch.setattr(app, "known_keys", lambda: frozenset({"good-key", "other-key"}))
     monkeypatch.setenv("SHOW_ALL_KEY", "all-key")
+    monkeypatch.delenv("SLACK_WEBHOOK_URL", raising=False)
     monkeypatch.setattr(app, "worksheet", worksheets.__getitem__)
     return worksheets
+
+
+@pytest.fixture
+def slack(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Record Slack messages instead of sending them."""
+    messages: list[str] = []
+    monkeypatch.setattr(app, "notify_slack", messages.append)
+    return messages
 
 
 def label(**changes: Any) -> dict:
@@ -177,15 +189,64 @@ def test_load_with_show_all_key_returns_every_key(
 
 
 def test_done_writes_completed_time(sheets: dict[str, FakeWorksheet]) -> None:
-    """Done writes the time to the key's completed column, again on repeat."""
+    """Done writes the time to the key's completed column, again on repeat.
+
+    The show-all key has no row in the keys sheet, so it gets 404 and writes
+    nothing.
+    """
     assert call({"key": "good-key", "action": "done"}) == (200, {"completed": True})
-    first = sheets["keys"].rows[2][4]
-    assert re.fullmatch(TIME_PATTERN, first)
+    assert re.fullmatch(TIME_PATTERN, sheets["keys"].rows[2][4])
     assert sheets["keys"].rows[1][4] == ""
     call({"key": "good-key", "action": "done"})
     assert re.fullmatch(TIME_PATTERN, sheets["keys"].rows[2][4])
 
-
-def test_done_with_key_missing_from_sheet(sheets: dict[str, FakeWorksheet]) -> None:
-    """The show-all key has no row in the keys sheet."""
+    before = [row[:] for row in sheets["keys"].rows]
     assert call({"key": "all-key", "action": "done"})[0] == 404
+    assert sheets["keys"].rows == before
+
+
+def test_done_slack_messages(
+    sheets: dict[str, FakeWorksheet], slack: list[str]
+) -> None:
+    """Done names the contributor and counts current labels; 404 sends nothing.
+
+    Cleared cells are not counted, and a blank email falls back to the key.
+    """
+    save_history()
+    call({"key": "good-key", "rows": [label(cell_id="c", label="peat")]})
+    call({"key": "good-key", "action": "done"})
+    call({"key": "other-key", "action": "done"})
+    call({"key": "all-key", "action": "done"})
+    assert slack == [
+        "good@example.org finished labeling: 1 peat, 1 not peat",
+        "other-key finished labeling: 1 peat, 0 not peat",
+    ]
+
+
+def test_notify_slack_webhook(
+    sheets: dict[str, FakeWorksheet], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Post JSON only when a URL is set; a failing webhook doesn't fail done."""
+    requests: list[tuple[urllib.request.Request, float]] = []
+
+    def record(request: urllib.request.Request, timeout: float) -> io.BytesIO:
+        requests.append((request, timeout))
+        return io.BytesIO(b"ok")
+
+    monkeypatch.setattr(urllib.request, "urlopen", record)
+    app.notify_slack("unset")
+    assert requests == []
+
+    url = "https://hooks.slack.com/services/x"
+    monkeypatch.setenv("SLACK_WEBHOOK_URL", url)
+    app.notify_slack("hello")
+    [(request, timeout)] = requests
+    assert (request.full_url, timeout) == (url, 5)
+    assert json.loads(request.data) == {"text": "hello"}
+
+    def fail(request: urllib.request.Request, timeout: float) -> None:
+        raise urllib.error.URLError("unreachable")
+
+    monkeypatch.setattr(urllib.request, "urlopen", fail)
+    assert call({"key": "good-key", "action": "done"}) == (200, {"completed": True})
+    assert re.fullmatch(TIME_PATTERN, sheets["keys"].rows[2][4])

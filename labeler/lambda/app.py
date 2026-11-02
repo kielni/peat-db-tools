@@ -13,6 +13,8 @@ CORS is handled by the function URL configuration, not here.
 
 import json
 import os
+import urllib.error
+import urllib.request
 from datetime import datetime, timezone
 from functools import cache
 from pathlib import Path
@@ -94,6 +96,21 @@ def save(key: str, payload: dict[str, Any]) -> dict[str, Any]:
     return response(200, {"saved": len(values)})
 
 
+def latest(key: str | None) -> dict[tuple[str, str], str]:
+    """Return the current label per (key, cell), for one key or all (None).
+
+    ``unknown`` labels are included.
+    """
+    labels: dict[tuple[str, str], str] = {}
+    # Columns: server_time, key, cell_id, latitude, longitude, label. Checking
+    # the label also skips a header row.
+    for row in worksheet("labels").get_all_values():
+        row_key, cell, label = row[1], row[2], row[5]
+        if label in LABELS and (key is None or row_key == key):
+            labels[row_key, cell] = label  # later rows win
+    return labels
+
+
 def load(key: str, payload: dict[str, Any]) -> dict[str, Any]:
     """Return the current label per (key, cell), for this key or for all keys.
 
@@ -101,26 +118,50 @@ def load(key: str, payload: dict[str, Any]) -> dict[str, Any]:
     are included so the page can draw cleared cells.
     """
     show_all = key == show_all_key()
-    latest: dict[tuple[str, str], str] = {}
-    # Columns: server_time, key, cell_id, latitude, longitude, label. Checking
-    # the label also skips a header row.
-    for row in worksheet("labels").get_all_values():
-        row_key, cell, label = row[1], row[2], row[5]
-        if label in LABELS and (show_all or row_key == key):
-            latest[row_key, cell] = label  # later rows win
-    labels = [{"cell_id": cell, "label": label} for (_, cell), label in latest.items()]
+    current = latest(None if show_all else key)
+    labels = [{"cell_id": cell, "label": label} for (_, cell), label in current.items()]
     return response(200, {"show_all": show_all, "labels": labels})
 
 
+def notify_slack(text: str) -> None:
+    """Post a message to the Slack webhook, if one is configured.
+
+    Errors are logged, not raised, so Slack can never fail a request.
+    """
+    url = os.environ.get("SLACK_WEBHOOK_URL")
+    if not url:
+        return
+    request = urllib.request.Request(
+        url,
+        data=json.dumps({"text": text}).encode(),
+        headers={"Content-Type": "application/json"},
+    )
+    try:
+        # Well under the function's 15 s timeout
+        with urllib.request.urlopen(request, timeout=5):
+            pass
+    except (urllib.error.URLError, TimeoutError) as error:
+        print(f"slack notification failed: {error}")
+
+
 def done(key: str, payload: dict[str, Any]) -> dict[str, Any]:
-    """Write the time to the key's ``completed`` column in the ``keys`` sheet."""
+    """Write the time to the key's ``completed`` column and tell Slack."""
     keys = worksheet("keys")
     found = keys.find(key, in_column=1)
     if found is None:
         return response(404, {"error": "key is not in the keys sheet"})
-    column = keys.row_values(1).index("completed") + 1
+    header = keys.row_values(1)
     # update_cells writes RAW, so the time stays text like in the labels sheet
-    keys.update_cells([gspread.Cell(found.row, column, now())])
+    keys.update_cells([gspread.Cell(found.row, header.index("completed") + 1, now())])
+
+    row = keys.row_values(found.row)
+    column = header.index("email")
+    email = row[column] if column < len(row) else ""
+    labels = list(latest(key).values())
+    notify_slack(
+        f"{email or key} finished labeling: {labels.count('peat')} peat, "
+        f"{labels.count('not peat')} not peat"
+    )
     return response(200, {"completed": True})
 
 
