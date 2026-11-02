@@ -76,9 +76,30 @@ from the repo root as `make labeler-TARGET`.
 
 - `make keys` — append 20 new keys to the `keys` tab and regenerate
   `lambda/keys.json`. Redeploy afterwards so the Lambda knows them.
+- `make export` — write current labels to `data/labels.csv`; see
+  [Export labels](#export-labels).
 - `make deploy` — build the Lambda image, push it to ECR, update the function.
 - `make site` — fill the API URL and MapTiler key into the page and upload it
   to S3.
 - `make logs` — tail the Lambda's logs.
 - [scripts/aws_setup.sh](scripts/aws_setup.sh) — one-time creation of the
   function, its public URL, and the website bucket.
+
+### Export labels
+
+1. Set `SHEET_ID` in `local.env`, and put `service-account.json` in this
+   directory. The sheet must be shared with the service account.
+2. Run `make export` here, or `make labeler-export` from the repo root. To
+   write somewhere else, run
+   `SHEET_ID=... uv run python scripts/export_labels.py OUTPUT.csv`.
+3. Open `data/labels.csv` at the repo root. Git ignores this file.
+
+The CSV has one row per contributor per cell, with the columns
+`server_time, key, email, cell_id, latitude, longitude, label`:
+
+- Only each contributor's latest label for a cell is kept. For example,
+  `peat` then `not peat` exports as `not peat`.
+- Cells whose latest label is `unknown` (cleared) are left out. For example,
+  `peat`, `not peat`, `unknown` exports no row.
+- If two contributors label the same cell differently, both rows are kept.
+- `email` comes from the `keys` tab and is blank when the key has no email.

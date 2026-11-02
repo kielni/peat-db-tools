@@ -16,13 +16,16 @@ IMAGE = $(REGISTRY)/$(ECR_REPO):$(FUNCTION_NAME)
 REQUIRED = AWS_REGION FUNCTION_NAME ECR_REPO SITE_BUCKET SITE_URL SHEET_ID \
 	MAPTILER_API_KEY
 
-.PHONY: check-env keys build push deploy \
+.PHONY: check-env keys export build push deploy \
 	render site url logs
 
 ## Google Sheet
 
 keys:
 	uv run python scripts/make_keys.py
+
+export:
+	uv run python scripts/export_labels.py
 
 
 ## AWS

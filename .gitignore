@@ -9,3 +9,4 @@ __pycache__/
 .venv/
 notes
 node_modules/
+data/labels.csv
