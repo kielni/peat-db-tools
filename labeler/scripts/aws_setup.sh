@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # One-time AWS setup: push the Lambda image, create the function with a public
-# URL, create the website bucket, and upload the map page.
+# URL, create the public bucket, and upload the map page.
 # Run from anywhere: scripts/aws_setup.sh
 set -euo pipefail
 
@@ -35,7 +35,7 @@ aws lambda add-permission --function-name "$FUNCTION_NAME" \
     --statement-id public-invoke --action lambda:InvokeFunction \
     --principal '*' --invoked-via-function-url > /dev/null
 
-# Public-read website bucket; us-east-1 rejects an explicit LocationConstraint
+# Public-read bucket; us-east-1 rejects an explicit LocationConstraint
 if [ "$AWS_REGION" = us-east-1 ]; then
     aws s3api create-bucket --bucket "$SITE_BUCKET" > /dev/null
 else
@@ -45,8 +45,6 @@ fi
 aws s3api put-public-access-block --bucket "$SITE_BUCKET" \
     --public-access-block-configuration \
     BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=false,RestrictPublicBuckets=false
-aws s3api put-bucket-website --bucket "$SITE_BUCKET" \
-    --website-configuration '{"IndexDocument": {"Suffix": "index.html"}}'
 
 mkdir -p build
 

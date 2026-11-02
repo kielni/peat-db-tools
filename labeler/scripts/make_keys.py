@@ -17,14 +17,14 @@ ROOT = Path(__file__).resolve().parent.parent
 
 def main() -> None:
     """Append 20 new keys with blank emails and sync keys.json."""
-    site_url = os.environ["SITE_URL"].rstrip("/")
+    site_url = os.environ["SITE_URL"]
     created = datetime.now(timezone.utc).date().isoformat()
     client = gspread.service_account(filename=ROOT / "service-account.json")
     worksheet = client.open_by_key(os.environ["SHEET_ID"]).worksheet("keys")
     rows = []
     for _ in range(20):
         key = secrets.token_urlsafe(12)  # 16 URL-safe characters
-        rows.append([key, "", f"{site_url}/?key={key}", created])
+        rows.append([key, "", f"{site_url}/index.html?key={key}", created])
     # RAW so a key starting with "-" or "+" is never read as a formula
     worksheet.append_rows(rows, value_input_option="RAW")
 

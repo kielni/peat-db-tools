@@ -37,7 +37,7 @@ flowchart LR
     subgraph Browser
         page["index.html + map.js<br/>(map, grid, labels)"]
     end
-    s3[(S3 website bucket)]
+    s3[(S3 bucket)]
     maptiler[MapTiler<br/>imagery + place search]
     lambda[Lambda function URL<br/>app.py]
     slack[Slack channel<br/>incoming webhook]
@@ -85,10 +85,11 @@ from the repo root as `make labeler-TARGET`.
   [Export labels](#export-labels).
 - `make deploy` — build the Lambda image, push it to ECR, update the function.
 - `make site` — fill the API URL and MapTiler key into the page and upload it
-  to S3.
+  to S3. The page is at `SITE_URL/index.html`, where `local.env` builds
+  `SITE_URL` from `SITE_BUCKET` and `AWS_REGION`.
 - `make logs` — tail the Lambda's logs.
 - [scripts/aws_setup.sh](scripts/aws_setup.sh) — one-time creation of the
-  function, its public URL, and the website bucket.
+  function, its public URL, and the public bucket.
 
 ### Slack notifications
 
