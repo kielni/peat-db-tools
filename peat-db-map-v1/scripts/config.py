@@ -18,16 +18,23 @@ log.
 CHUNK_SIZE = 1000
 
 # Lowest zoom that shows individual markers; clusters cover zooms below it.
-# At 10 with a 40 px radius, 132,877 clusters in two files:
-#   clusters_world.json, zooms 0-2: 479 clusters, 11.4 KB, 5.3 KB gzipped
-#   clusters.json, zooms 3-9: 132,398 clusters, 2.9 MB, 1.0 MB gzipped
+# At 11 with a 40 px radius, 197,719 clusters in two files:
+#   clusters_world.json, zooms 0-2: 478 clusters, 11.3 KB
+#   clusters.json, zooms 3-10: 197,241 clusters, 4.3 MB, 1.5 MB gzipped
 # Clusters per zoom:
-#   z0: 42, z1: 111, z2: 326, z3: 894, z4: 2316, z5: 5581, z6: 11981,
-#   z7: 22668, z8: 36750, z9: 52208
-# z8 and z9 hold two thirds of the clusters; dropping them would shrink
-# clusters.json to under 1 MB.
-CLUSTER_MAX_ZOOM = 10
+#   z0: 40, z1: 113, z2: 325, z3: 895, z4: 2322, z5: 5584, z6: 11970,
+#   z7: 22666, z8: 36720, z9: 51356, z10: 65728
+# Chosen from views centered on the densest clusters (Scotland): the
+# densest view at the switch loads 7,275 cores (0.9 MB of markers.fgb) at
+# 11, against 20,190 (2.5 MB) at 10. Each zoom past 11 adds about 0.5 MB
+# gzipped to clusters.json but barely shrinks the densest view, whose
+# cores sit at nearly the same coordinates. See the implementation plan's
+# measurements section.
+CLUSTER_MAX_ZOOM = 11
 
 # Clusters within this many screen pixels of each other merge.
-# Supercluster's default is 40 px at a 512 px tile.
+# Supercluster's default is 40 px at a 512 px tile. File size barely
+# depends on it (clusters.json gzipped: 1.71 MB at 30 px, 1.50 MB at 40,
+# 1.34 MB at 50, 1.03 MB at 80), so the circle style decides it: the
+# largest circle and its count label should fit within this radius.
 CLUSTER_RADIUS_PX = 40
