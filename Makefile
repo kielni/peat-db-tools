@@ -1,7 +1,5 @@
-# Peat DB tools: shared lint/test; each tool has its own Makefile.
-# Run a tool's target from here as TOOL-TARGET, e.g. `make labeler-deploy`.
-
-TOOLS = labeler
+# Peat DB tools: shared lint/test. Each tool has its own independent
+# Makefile; run its targets from inside the tool's directory.
 
 .PHONY: lint test
 
@@ -12,6 +10,3 @@ lint:
 
 test:
 	uv run pytest
-
-$(addsuffix -%,$(TOOLS)):
-	$(MAKE) -C $(firstword $(subst -, ,$@)) $*

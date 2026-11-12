@@ -76,8 +76,7 @@ flowchart LR
 ### Setup and deploy
 
 Settings live in `local.env` (copy from
-[local.env.example](local.env.example)). Run targets from this directory, or
-from the repo root as `make labeler-TARGET`.
+[local.env.example](local.env.example)). Run targets from this directory.
 
 - `make keys` — append 20 new keys to the `keys` tab and regenerate
   `lambda/keys.json`. Redeploy afterwards so the Lambda knows them.
@@ -120,7 +119,7 @@ Leave `SLACK_WEBHOOK_URL` empty to turn notifications off.
 
 1. Set `SHEET_ID` in `local.env`, and put `service-account.json` in this
    directory. The sheet must be shared with the service account.
-2. Run `make export` here, or `make labeler-export` from the repo root. To
+2. Run `make export` here. To
    write somewhere else, run
    `SHEET_ID=... uv run python scripts/export_labels.py OUTPUT.csv`.
 3. Open `data/labels.csv` at the repo root. Git ignores this file.

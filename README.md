@@ -25,7 +25,6 @@ Run shared targets from the repo root:
   HTML, CSS, and JavaScript
 - `make test` — pytest over every tool's tests
 
-Each tool has its own `Makefile` for build and deploy targets. Run them from the
-root as `make TOOL-TARGET` (e.g. `make labeler-deploy`) or with
-`make -C TOOL TARGET`. A tool's settings live in `TOOL/local.env`
+Each tool has its own `Makefile` for build and deploy targets. Run them from
+inside the tool's directory (e.g. `cd labeler && make deploy`). A tool's settings live in `TOOL/local.env`
 (copy from `TOOL/local.env.example`).

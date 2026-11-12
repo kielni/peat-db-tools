@@ -32,9 +32,9 @@ function colFor(lng) {
   return Math.floor(lng / CELL_DEG);
 }
 
-// Cell center as [longitude, latitude], rounded to 0.1 m
+// Cell center as [longitude, latitude], unrounded to match the grid spec
 function cellCenter(row, col) {
-  return [col, row].map((index) => Number(((index + 0.5) * CELL_DEG).toFixed(6)));
+  return [col, row].map((index) => (index + 0.5) * CELL_DEG);
 }
 
 function clusterSource(label) {

@@ -10,3 +10,5 @@ __pycache__/
 notes
 node_modules/
 data/labels.csv
+peat-db-map-v1/build
+peat-db-map-v1/local.env
