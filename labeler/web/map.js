@@ -117,13 +117,17 @@ if (!KEY) {
   doneButton.hidden = true;
 }
 
-const map = new maplibregl.Map({
+maptilersdk.config.apiKey = MAPTILER_KEY;
+
+// The SDK adds a navigation control at top right by default.
+const map = new maptilersdk.Map({
   container: "map",
-  style: `https://api.maptiler.com/maps/hybrid/style.json?key=${MAPTILER_KEY}`,
+  style: maptilersdk.MapStyle.HYBRID,
+  // The 7.5″ grid is drawn in Web Mercator; keep the map in it too.
+  projection: "mercator",
   center: hasStart ? START : [0, 20],
   zoom: hasStart ? SEARCH_ZOOM : 1.5,
 });
-map.addControl(new maplibregl.NavigationControl(), "top-right");
 
 const labelColor = (fallback) => [
   "match",
