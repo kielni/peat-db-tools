@@ -130,23 +130,25 @@ def test_merge_clusters_within_radius() -> None:
     x = np.array([0.0, 0.5, 10.0])
     y = np.array([0.0, 0.0, 0.0])
     count = np.array([3, 1, 2])
-    merged_x, merged_y, merged_count = preprocess.merge_clusters(
+    merged_x, merged_y, merged_count, parent = preprocess.merge_clusters(
         x, y, count, radius=1.0
     )
     # the first two merge at their count-weighted centroid; the far one stays
     assert merged_count.tolist() == [4, 2]
     assert merged_x.tolist() == [0.125, 10.0]
     assert merged_y.tolist() == [0.0, 0.0]
+    assert parent.tolist() == [0, 0, 1]
 
 
 def test_merge_clusters_visits_in_order() -> None:
     # 0 absorbs 1, so 1 cannot also absorb 2, which is only near 1
     x = np.array([0.0, 0.9, 1.8])
-    merged_x, _, merged_count = preprocess.merge_clusters(
+    merged_x, _, merged_count, parent = preprocess.merge_clusters(
         x, np.zeros(3), np.ones(3, dtype=int), radius=1.0
     )
     assert merged_count.tolist() == [2, 1]
     assert merged_x.tolist() == [0.45, 1.8]
+    assert parent.tolist() == [0, 0, 1]
 
 
 def test_build_clusters_nest_across_zooms() -> None:
@@ -154,27 +156,111 @@ def test_build_clusters_nest_across_zooms() -> None:
     lat = np.array([60.0, 60.1, -3.0, -3.1, 45.0])
     levels = preprocess.build_clusters(lon, lat, max_zoom=12, radius_px=40)
     assert len(levels) == 12
-    sizes = [len(count) for _, _, count in levels]
-    for _, _, count in levels:
-        assert count.sum() == len(lon)
+    sizes = [len(level.count) for level in levels]
+    for level in levels:
+        assert level.count.sum() == len(lon)
     # zooming out never adds clusters
     assert sizes == sorted(sizes)
     # each close pair is one cluster at zoom 0 and two by zoom 11
     assert sizes[0] == 3
     assert sizes[11] == 5
     # a dense pair merges at its centroid
-    zoom_0_lon, zoom_0_lat, _ = levels[0]
+    zoom_0_lon = levels[0].lon
     assert np.isclose(zoom_0_lon, 25.05).any()
+
+
+def test_build_clusters_bounds_and_single_cores() -> None:
+    # about 0.011 degrees apart at the equator: 33 px at zoom 11, 65 px at
+    # zoom 12, so the pair is one cluster through zoom 11 and splits at 12.
+    lon = np.array([0.0, 0.01])
+    lat = np.array([0.0, 0.005])
+    levels = preprocess.build_clusters(lon, lat, max_zoom=14, radius_px=40)
+    for zoom in range(12):
+        level = levels[zoom]
+        assert level.count.tolist() == [2]
+        # the cluster's bounds span both cores
+        assert (level.west[0], level.south[0]) == (0.0, 0.0)
+        assert (level.east[0], level.north[0]) == (0.01, 0.005)
+    for zoom in (12, 13):
+        level = levels[zoom]
+        assert level.count.tolist() == [1, 1]
+        # a single core's bounds are its own point
+        assert level.west.tolist() == level.east.tolist()
+        assert level.south.tolist() == level.north.tolist()
+    # alone from zoom 12, so already single before only at zoom 13
+    assert levels[12].single_before.tolist() == [False, False]
+    assert levels[13].single_before.tolist() == [True, True]
+
+
+def test_build_clusters_bounds_span_merged_clusters() -> None:
+    lon = np.array([25.0, 25.1, 115.0, 115.1, -80.0])
+    lat = np.array([60.0, 60.1, -3.0, -3.1, 45.0])
+    levels = preprocess.build_clusters(lon, lat, max_zoom=12, radius_px=40)
+    for level in levels:
+        # bounds contain each cluster's centroid (to within the rounding of
+        # projecting and unprojecting it)
+        assert np.all(level.west <= level.lon + 1e-9)
+        assert np.all(level.lon <= level.east + 1e-9)
+        assert np.all(level.south <= level.lat + 1e-9)
+        assert np.all(level.lat <= level.north + 1e-9)
+    # at zoom 0 the Borneo pair is one cluster spanning both cores
+    borneo = levels[0].count == 2
+    borneo &= levels[0].lon > 100
+    assert levels[0].west[borneo].tolist() == [115.0]
+    assert levels[0].east[borneo].tolist() == [115.1]
+    assert levels[0].south[borneo].tolist() == [-3.1]
+    assert levels[0].north[borneo].tolist() == [-3.0]
+
+
+def shown_at(features: list[dict], zoom: int) -> list[dict]:
+    """Return the features a map layer for ``zoom`` shows.
+
+    Mirrors the web map's filter: clusters at ``zoom``, plus single cores
+    first stored at a lower zoom.
+    """
+    return [
+        f
+        for f in features
+        if f["properties"]["zoom"] == zoom
+        or (f["properties"]["count"] == 1 and f["properties"]["zoom"] < zoom)
+    ]
 
 
 def test_write_clusters(cores: gpd.GeoDataFrame, tmp_path: Path) -> None:
     preprocess.write_clusters(cores, tmp_path, max_zoom=12, radius_px=40)
     world = json.loads((tmp_path / "clusters_world.json").read_text())
     rest = json.loads((tmp_path / "clusters.json").read_text())
-    assert (world["min_zoom"], world["max_zoom"]) == (0, 3)
-    assert len(world["zooms"]) == 3
-    assert (rest["min_zoom"], rest["max_zoom"]) == (3, 12)
-    assert len(rest["zooms"]) == 9
-    for zoom in world["zooms"] + rest["zooms"]:
-        assert sum(c[2] for c in zoom) == len(cores)
-        assert all(len(c) == 3 for c in zoom)
+    for collection in (world, rest):
+        assert collection["type"] == "FeatureCollection"
+        for feature in collection["features"]:
+            assert feature["geometry"]["type"] == "Point"
+            properties = feature["properties"]
+            if properties["count"] == 1:
+                assert set(properties) == {"zoom", "count"}
+            else:
+                assert set(properties) == {
+                    "zoom",
+                    "count",
+                    "west",
+                    "south",
+                    "east",
+                    "north",
+                }
+
+    # each file stands alone: every zoom it covers shows every core
+    for features, zooms in (
+        (world["features"], range(3)),
+        (rest["features"], range(3, 12)),
+    ):
+        for zoom in zooms:
+            shown = shown_at(features, zoom)
+            assert sum(f["properties"]["count"] for f in shown) == len(cores)
+
+    # the isolated Canada core is stored once per file, at the file's
+    # lowest zoom
+    canada = [
+        f
+        for f in world["features"] + rest["features"]
+        if f["geometry"]["coordinates"] == [-80.0, 45.0]
+    ]
+    assert [f["properties"]["zoom"] for f in canada] == [0, 3]

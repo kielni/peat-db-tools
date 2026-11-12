@@ -5,9 +5,9 @@ Outputs, under the output directory:
 - markers.fgb: core points with ``core_id`` and a FlatGeobuf spatial index
 - datasets.json: one entry per original dataset with its source notes
 - cards/<n>.json: card rows for cores ``n * CHUNK_SIZE`` and up
-- clusters_world.json: cluster centroids and counts for zooms 0 to 2, the
-  first page load
-- clusters.json: cluster centroids and counts for zooms 3 up to
+- clusters_world.json: clusters (GeoJSON points with zoom and count) for
+  zooms 0 to 2, the first page load
+- clusters.json: clusters in the same form for zooms 3 up to
   ``CLUSTER_MAX_ZOOM``
 
 Usage: python preprocess.py INPUT_CSV OUTPUT_DIR
@@ -17,6 +17,7 @@ import argparse
 import json
 import logging
 from pathlib import Path
+from typing import NamedTuple
 
 import geopandas as gpd
 import numpy as np
@@ -175,18 +176,39 @@ def unproject(x: np.ndarray, y: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     return lon, lat
 
 
+class Level(NamedTuple):
+    """Clusters at one zoom level.
+
+    ``west``, ``south``, ``east`` and ``north`` bound each cluster's cores,
+    so clicking a cluster zooms the map to fit them. ``single_before``
+    marks single cores that were already single at the zoom below, so they
+    can be stored only once.
+    """
+
+    lon: np.ndarray
+    lat: np.ndarray
+    count: np.ndarray
+    west: np.ndarray
+    south: np.ndarray
+    east: np.ndarray
+    north: np.ndarray
+    single_before: np.ndarray
+
+
 def merge_clusters(
     x: np.ndarray, y: np.ndarray, count: np.ndarray, radius: float
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Merge clusters within ``radius`` of each other, Supercluster style.
 
     Visit clusters in input order. Each unvisited cluster absorbs every
     unvisited cluster within ``radius`` (in world units), and the merged
     cluster sits at the count-weighted centroid of its members. Returns
-    the merged clusters' ``x``, ``y`` and ``count``.
+    the merged clusters' ``x``, ``y`` and ``count``, plus ``parent``: the
+    index of the merged cluster each input cluster joined.
     """
     tree = cKDTree(np.column_stack([x, y]))
     visited = np.zeros(len(x), dtype=bool)
+    parent = np.empty(len(x), dtype=int)
     merged_x: list[float] = []
     merged_y: list[float] = []
     merged_count: list[int] = []
@@ -198,57 +220,124 @@ def merge_clusters(
         neighbors = np.array(tree.query_ball_point([x[i], y[i]], radius))
         members = neighbors[~visited[neighbors]]
         visited[members] = True
+        parent[members] = len(merged_count)
         weights = count[members]
         total = int(weights.sum())
         merged_x.append(float(x[members] @ weights) / total)
         merged_y.append(float(y[members] @ weights) / total)
         merged_count.append(total)
-    return np.array(merged_x), np.array(merged_y), np.array(merged_count)
+    return np.array(merged_x), np.array(merged_y), np.array(merged_count), parent
 
 
 def build_clusters(
     lon: np.ndarray, lat: np.ndarray, max_zoom: int, radius_px: int
-) -> list[tuple[np.ndarray, np.ndarray, np.ndarray]]:
+) -> list[Level]:
     """Return clusters for each zoom below ``max_zoom``, indexed by zoom.
 
     Each core starts as a cluster of count 1. Working down from
     ``max_zoom - 1`` to 0, merge the previous zoom's clusters, so clusters
-    nest across zooms. Each entry holds the clusters' ``lon``, ``lat`` and
-    ``count``.
+    nest across zooms: each cluster at zoom ``z`` is made of whole
+    clusters from zoom ``z + 1``.
+
+    Bounds: each core starts as its own bounds; a merged cluster's bounds
+    span its members' bounds.
     """
     x, y = project(lon, lat)
     count = np.ones(len(x), dtype=int)
-    levels: list[tuple[np.ndarray, np.ndarray, np.ndarray]] = []
+    west, south, east, north = lon.copy(), lat.copy(), lon.copy(), lat.copy()
+    levels: list[Level] = []
     for zoom in range(max_zoom - 1, -1, -1):
         radius = radius_px / (TILE_PX * 2**zoom)
-        x, y, count = merge_clusters(x, y, count, radius)
-        levels.append((*unproject(x, y), count))
+        merged_x, merged_y, merged_count, parent = merge_clusters(x, y, count, radius)
+        size = len(merged_count)
+        merged_west = np.full(size, np.inf)
+        merged_south = np.full(size, np.inf)
+        merged_east = np.full(size, -np.inf)
+        merged_north = np.full(size, -np.inf)
+        np.minimum.at(merged_west, parent, west)
+        np.minimum.at(merged_south, parent, south)
+        np.maximum.at(merged_east, parent, east)
+        np.maximum.at(merged_north, parent, north)
+        if levels:
+            # A single core at zoom + 1 whose cluster here is also a single
+            # core was already alone at this zoom. Single cores stay alone,
+            # at the same position, at every higher zoom, since clusters
+            # only split as zoom grows.
+            single_before = (count == 1) & (merged_count[parent] == 1)
+            levels[-1] = levels[-1]._replace(single_before=single_before)
+        x, y, count = merged_x, merged_y, merged_count
+        west, south, east, north = merged_west, merged_south, merged_east, merged_north
+        # Zoom 0 has no zoom below it, so nothing there was single before.
+        levels.append(
+            Level(
+                *unproject(x, y),
+                count,
+                west,
+                south,
+                east,
+                north,
+                np.zeros(size, bool),
+            )
+        )
         log.info(f"Zoom {zoom}: {len(count):,} clusters")
     return levels[::-1]
 
 
 def write_cluster_file(
-    levels: list[tuple[np.ndarray, np.ndarray, np.ndarray]],
-    min_zoom: int,
-    max_zoom: int,
-    path: Path,
+    levels: list[Level], min_zoom: int, max_zoom: int, path: Path
 ) -> None:
-    """Write clusters for zooms ``min_zoom`` up to ``max_zoom`` to JSON.
+    """Write clusters for zooms ``min_zoom`` up to ``max_zoom`` as GeoJSON.
 
-    Layout: ``{"min_zoom": M, "max_zoom": N, "zooms": [[[lon, lat, count],
-    ...], ...]}``, where ``zooms[i]`` holds zoom ``M + i``.
+    The web map loads the file directly as a GeoJSON source: one point
+    feature per cluster, with ``zoom`` and ``count`` properties. Clusters
+    of two or more cores also carry ``west``, ``south``, ``east`` and
+    ``north``, the bounds of their cores, which the map zooms to on click;
+    a single core's bounds are its own point.
+
+    Single cores are written once, at the lowest zoom in the file where
+    they stand alone; the map shows a single core at its ``zoom`` and
+    every higher zoom. Without this, a core alone from zoom 7 would repeat
+    at zooms 8, 9 and 10. Each file starts with all single cores at its
+    ``min_zoom``, so it does not depend on the other file.
+
+    Coordinates and bounds use 4 decimal places, about 11 m, finer than a
+    pixel (about 76 m at the equator) at zoom 10, the highest pre-built
+    zoom.
     """
-    zooms = [
-        # 5 decimal places is about 1 m
-        [
-            [round(c_lon, 5), round(c_lat, 5), c_count]
-            for c_lon, c_lat, c_count in zip(lon.tolist(), lat.tolist(), count.tolist())
-        ]
-        for lon, lat, count in levels[min_zoom:max_zoom]
-    ]
-    write_json({"min_zoom": min_zoom, "max_zoom": max_zoom, "zooms": zooms}, path)
-    cluster_count = sum(len(zoom) for zoom in zooms)
-    log.info(f"Wrote {cluster_count:,} clusters to {path} ({size_text(path)})")
+    features: list[dict] = []
+    for zoom, level in enumerate(levels[min_zoom:max_zoom], start=min_zoom):
+        for c_lon, c_lat, c_count, west, south, east, north, single_before in zip(
+            level.lon.tolist(),
+            level.lat.tolist(),
+            level.count.tolist(),
+            level.west.tolist(),
+            level.south.tolist(),
+            level.east.tolist(),
+            level.north.tolist(),
+            level.single_before.tolist(),
+        ):
+            if single_before and zoom != min_zoom:
+                continue
+            properties = {"zoom": zoom, "count": c_count}
+            if c_count > 1:
+                properties.update(
+                    west=round(west, 4),
+                    south=round(south, 4),
+                    east=round(east, 4),
+                    north=round(north, 4),
+                )
+            features.append(
+                {
+                    "type": "Feature",
+                    "geometry": {
+                        "type": "Point",
+                        "coordinates": [round(c_lon, 4), round(c_lat, 4)],
+                    },
+                    "properties": properties,
+                }
+            )
+    write_json({"type": "FeatureCollection", "features": features}, path)
+    log.info(f"Wrote {len(features):,} clusters to {path} ({size_text(path)})")
 
 
 def write_clusters(

@@ -19,8 +19,11 @@ CHUNK_SIZE = 1000
 
 # Lowest zoom that shows individual markers; clusters cover zooms below it.
 # At 11 with a 40 px radius, 197,719 clusters in two files:
-#   clusters_world.json, zooms 0-2: 478 clusters, 11.3 KB
-#   clusters.json, zooms 3-10: 197,241 clusters, 4.3 MB, 1.5 MB gzipped
+#   clusters_world.json, zooms 0-2: 462 features, 79.5 KB, 13.6 KB gzipped
+#   clusters.json, zooms 3-10: 132,770 features, 20.5 MB, 2.6 MB gzipped
+#   (GeoJSON with cluster bounds, single cores stored once; without
+#   bounds 16.7 MB, 1.2 MB gzipped; repeating single cores at every zoom was
+#   22.7 MB, 1.8 MB gzipped; the compact array layout was 4.3 MB, 1.5 MB)
 # Clusters per zoom:
 #   z0: 40, z1: 113, z2: 325, z3: 895, z4: 2322, z5: 5584, z6: 11970,
 #   z7: 22666, z8: 36720, z9: 51356, z10: 65728
