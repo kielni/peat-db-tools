@@ -33,8 +33,6 @@ TILE_PX = 512
 # Web Mercator stops at this latitude.
 MAX_LAT = 85.05112878
 
-DATASET_COLUMNS = ["original_dataset", "original_dataset_source_notes"]
-
 
 def size_text(path: Path) -> str:
     """Return the size of a file, or the total of files in a directory."""
@@ -90,7 +88,7 @@ def keep_fields(cores: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
     color). The card shows the rest, per the spec's "detail card should
     show" list.
     """
-    kept = [
+    keep = [
         "core_id",
         "sample_id",
         "lat",
@@ -100,13 +98,12 @@ def keep_fields(cores: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
         "site_condition",
         "peat_measurement",
         "error_found",
-        *DATASET_COLUMNS,
+        "original_dataset",
+        "original_dataset_source_notes",
         "geometry",
     ]
-    dropped = [column for column in cores.columns if column not in kept]
-    log.info(f"Dropping fields: {', '.join(dropped)}")
-    log.info(f"Kept {len(kept) - 1} fields plus geometry")
-    return cores[kept]
+    log.info(f"Keep fields {','.join(keep)}, plus geometry")
+    return cores[keep]
 
 
 def write_markers(cores: gpd.GeoDataFrame, path: Path) -> None:
@@ -145,7 +142,9 @@ def write_cards(
     ``core_id // chunk_size``. Each row holds ``dataset``, an index into
     datasets.json, instead of the dataset columns.
     """
-    cards = cores.drop(columns=["geometry", *DATASET_COLUMNS])
+    cards = cores.drop(
+        columns=["geometry", "original_dataset", "original_dataset_source_notes"]
+    )
     cards.insert(1, "dataset", codes)
     out_dir.mkdir(parents=True, exist_ok=True)
     chunk_count = 0
@@ -178,6 +177,10 @@ def unproject(x: np.ndarray, y: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
 
 class Level(NamedTuple):
     """Clusters at one zoom level.
+
+    Each field is an array with one value per cluster; index ``i`` across
+    the fields describes cluster ``i``. Arrays let each step work on a
+    whole zoom at once.
 
     ``west``, ``south``, ``east`` and ``north`` bound each cluster's cores,
     so clicking a cluster zooms the map to fit them. ``single_before``
@@ -287,7 +290,7 @@ def build_clusters(
         )
         log.info(
             f"Zoom {zoom}: {len(count):,} clusters, {len(count) - len(multi):,} "
-            f"single cores; counts of the rest: min {low:,.0f}, "
+            f"single cores. cluster sizes: min {low:,.0f}, "
             f"median {median:,.0f}, p90 {p90:,.0f}, max {high:,.0f}"
         )
     return levels[::-1]
@@ -365,6 +368,7 @@ def write_clusters(
     # (the world is 512 px wide at zoom 0).
     world_max_zoom = 3
     write_cluster_file(levels, 0, world_max_zoom, out_dir / "clusters_world.json")
+    # TODO: decide if it's worth splitting more
     write_cluster_file(levels, world_max_zoom, max_zoom, out_dir / "clusters.json")
 
 
@@ -374,7 +378,11 @@ def main() -> None:
     parser.add_argument("input_csv", type=Path)
     parser.add_argument("output_dir", type=Path)
     args = parser.parse_args()
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(message)s",
+        datefmt="%H:%M:%S",
+    )
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
     cores = keep_fields(sort_cores(read_cores(args.input_csv)))
@@ -382,7 +390,10 @@ def main() -> None:
     codes, datasets = build_datasets(cores)
     datasets_path = args.output_dir / "datasets.json"
     write_json(datasets, datasets_path)
-    log.info(f"Wrote {len(datasets):,} datasets ({size_text(datasets_path)})")
+    log.info(
+        f"Wrote {len(datasets):,} datasets to {datasets_path} "
+        f"({size_text(datasets_path)})"
+    )
     write_cards(cores, codes, args.output_dir / "cards", CHUNK_SIZE)
     write_clusters(cores, args.output_dir, CLUSTER_MAX_ZOOM, CLUSTER_RADIUS_PX)
     log.info(f"Done: {args.output_dir} ({size_text(args.output_dir)})")
