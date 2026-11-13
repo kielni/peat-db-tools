@@ -279,7 +279,17 @@ def build_clusters(
                 np.zeros(size, bool),
             )
         )
-        log.info(f"Zoom {zoom}: {len(count):,} clusters")
+        # Count distribution of clusters of two or more cores; single cores
+        # draw as core markers, so they are reported separately.
+        multi = count[count > 1]
+        low, median, p90, high = (
+            np.percentile(multi, [0, 50, 90, 100]) if len(multi) else (0, 0, 0, 0)
+        )
+        log.info(
+            f"Zoom {zoom}: {len(count):,} clusters, {len(count) - len(multi):,} "
+            f"single cores; counts of the rest: min {low:,.0f}, "
+            f"median {median:,.0f}, p90 {p90:,.0f}, max {high:,.0f}"
+        )
     return levels[::-1]
 
 
