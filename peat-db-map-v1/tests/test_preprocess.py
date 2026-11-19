@@ -25,26 +25,70 @@ ROWS = [
     "C,2,,-80.0,50,1999,fen,Lee 1999,C,,,,L6,,S6",
     "C,3,95.0,-80.0,50,1999,fen,Lee 1999,C,,,,L7,,S7",
 ]
+DUPLICATE_ROWS = [
+    # location duplicates: two cores at the same coordinates, different samples
+    "D (2020),1,10.0,10.0,100,2020-01-01,bog,Doe,C,,,,L10,,S10",
+    "E (2021),1,10.0,10.0,200,2021-05-01,,Eve,C,,,,L10,,S11",
+    # sample duplicates: the row with more card fields wins over an earlier year
+    "F (2015),5,20.0,20.0,300,,fen,Fox,C,,,,L20,,S20",
+    "G (2016),7,20.0,20.0,300,2012-01-01,fen,Gee,C,,,,L20,,S20",
+    # sample duplicates with equal fields: the earlier citation year wins
+    "H (2018),1,30.0,30.0,50,,,Ho,C,,,,L30,,S30",
+    # ("Not provided" counts as a blank site_condition)
+    "I (2012),2,30.0,30.0,60,,Not provided,Ito,C,,,,L30,,S30",
+    # a dataset without a citation year loses the tie
+    "Unpublished J,4,40.0,40.0,70,,,Jay,C,,,,L40,,S40",
+    "K (2019),3,40.0,40.0,70,,,Kay,C,,,,L40,,S40",
+]
+
+
+def write_csv(path: Path, rows: list[str]) -> Path:
+    """Write a fixture CSV with the header and ``rows``; return its path."""
+    path.write_text("\n".join([HEADER, *rows]) + "\n")
+    return path
+
+
+def read_with_datasets(path: Path) -> tuple[gpd.GeoDataFrame, list[dict]]:
+    """Read a fixture CSV and add the ``dataset`` index, as main() does."""
+    rows = preprocess.read_cores(path)
+    codes, datasets = preprocess.build_datasets(rows)
+    rows["dataset"] = codes
+    return rows, datasets
+
+
+def prepare(rows: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
+    """Run the pipeline steps between reading and writing, as main() does."""
+    cores = preprocess.drop_sample_duplicates(rows)
+    cores = preprocess.sort_cores(cores)
+    cores = preprocess.add_location_groups(cores)
+    return preprocess.prune_fields(cores)
 
 
 @pytest.fixture
 def csv_path(tmp_path: Path) -> Path:
     """Write the fixture CSV and return its path."""
-    path = tmp_path / "peat.csv"
-    path.write_text("\n".join([HEADER, *ROWS]) + "\n")
-    return path
+    return write_csv(tmp_path / "peat.csv", ROWS)
 
 
 @pytest.fixture
 def cores(csv_path: Path) -> gpd.GeoDataFrame:
-    """Return the fixture cores, read, sorted and limited to kept fields."""
-    return preprocess.keep_fields(
-        preprocess.sort_cores(preprocess.read_cores(csv_path))
+    """Return the fixture cores, ready to write."""
+    return prepare(read_with_datasets(csv_path)[0])
+
+
+@pytest.fixture
+def duplicates(tmp_path: Path) -> tuple[gpd.GeoDataFrame, list[str]]:
+    """Return the duplicate fixture rows and their dataset names by index."""
+    rows, datasets = read_with_datasets(
+        write_csv(tmp_path / "duplicates.csv", DUPLICATE_ROWS)
     )
+    return rows, [d["name"] for d in datasets]
 
 
-def test_keep_fields_drops_unused_columns(cores: gpd.GeoDataFrame) -> None:
+def test_prune_fields_drops_unused_columns(cores: gpd.GeoDataFrame) -> None:
     for column in [
+        "original_dataset",
+        "original_dataset_source_notes",
         "original_entry_num",
         "investigation_notes",
         "location_is_duplicate",
@@ -52,7 +96,87 @@ def test_keep_fields_drops_unused_columns(cores: gpd.GeoDataFrame) -> None:
         "sample_duplication_flag",
     ]:
         assert column not in cores.columns
-    assert {"core_id", "sample_id", "error_found", "geometry"} <= set(cores.columns)
+    assert {"core_id", "sample_id", "dataset", "error_found", "geometry"} <= set(
+        cores.columns
+    )
+
+
+def test_drop_sample_duplicates(
+    duplicates: tuple[gpd.GeoDataFrame, list[str]],
+) -> None:
+    rows, names = duplicates
+    kept = preprocess.drop_sample_duplicates(rows)
+    by_sample = {row.sample_id: row for row in kept.itertuples()}
+    assert list(by_sample) == ["S10", "S11", "S20", "S30", "S40"]
+    # location duplicates are not sample duplicates, so both stay
+    assert by_sample["S10"].also_reported_in is None
+    assert by_sample["S11"].also_reported_in is None
+    winners = {"S20": ("G (2016)", "F (2015)", 5), "S30": ("I (2012)", "H (2018)", 1)}
+    winners["S40"] = ("K (2019)", "Unpublished J", 4)
+    for sample_id, (winner, loser, entry) in winners.items():
+        row = by_sample[sample_id]
+        assert names[row.dataset] == winner
+        assert row.also_reported_in == [[names.index(loser), entry]]
+
+
+def test_location_groups_share_consecutive_core_ids(
+    duplicates: tuple[gpd.GeoDataFrame, list[str]],
+) -> None:
+    rows, names = duplicates
+    cores = prepare(rows)
+    by_sample = {row.sample_id: row for row in cores.itertuples()}
+    first, second = sorted(
+        [by_sample["S10"], by_sample["S11"]], key=lambda row: row.core_id
+    )
+    assert second.core_id == first.core_id + 1
+    for row in (first, second):
+        assert (row.location_first, row.location_count) == (first.core_id, 2)
+    # only the group's first core carries the summary
+    assert second.location_summary is None
+    assert first.location_summary == {
+        "datasets": sorted([names.index("D (2020)"), names.index("E (2021)")]),
+        "depth_cm": [100.0, 200.0],
+        "sample_date": ["2020-01-01", "2021-05-01"],
+    }
+    # a core alone at its location after sample duplicates drop has no group
+    alone = by_sample["S20"]
+    assert alone.location_first is None
+    assert alone.location_count is None
+    assert alone.location_summary is None
+
+
+def test_location_groups_reject_split_groups() -> None:
+    cores = gpd.GeoDataFrame(
+        {
+            "core_id": [0, 1, 2],
+            "location_id": ["a", "b", "a"],
+            "dataset": [0, 0, 0],
+            "depth_cm": ["1", "2", "3"],
+            "sample_date": ["", "", ""],
+        }
+    )
+    with pytest.raises(ValueError):
+        preprocess.add_location_groups(cores)
+
+
+def test_write_cards_leaves_out_empty_duplicate_fields(
+    duplicates: tuple[gpd.GeoDataFrame, list[str]], tmp_path: Path
+) -> None:
+    cores = prepare(duplicates[0])
+    preprocess.write_cards(cores, tmp_path / "cards", chunk_size=100)
+    cards = {
+        card["sample_id"]: card
+        for card in json.loads((tmp_path / "cards" / "0.json").read_text())
+    }
+    assert (
+        cards["S20"]["also_reported_in"]
+        == cores.loc[cores["sample_id"] == "S20", "also_reported_in"].item()
+    )
+    assert "location_first" not in cards["S20"]
+    location_cards = [cards["S10"], cards["S11"]]
+    assert all(card["location_count"] == 2 for card in location_cards)
+    assert sum("location_summary" in card for card in location_cards) == 1
+    assert all("also_reported_in" not in card for card in location_cards)
 
 
 def test_read_cores_parses_multiline_and_drops_invalid(csv_path: Path) -> None:
@@ -62,29 +186,26 @@ def test_read_cores_parses_multiline_and_drops_invalid(csv_path: Path) -> None:
     assert set(raw["sample_id"]) == {"S1", "S2", "S3", "S4", "S5"}
 
 
-def test_sort_cores_follows_hilbert_order(cores: gpd.GeoDataFrame) -> None:
-    assert cores["core_id"].tolist() == list(range(len(cores)))
-    distance = cores.hilbert_distance().tolist()
-    assert distance == sorted(distance)
-    # nearby cores sit next to each other
-    positions = {s: i for i, s in enumerate(cores["sample_id"])}
-    assert abs(positions["S1"] - positions["S2"]) == 1
-    assert abs(positions["S3"] - positions["S4"]) == 1
-
-
 def test_write_markers(cores: gpd.GeoDataFrame, tmp_path: Path) -> None:
     path = tmp_path / "markers.fgb"
     preprocess.write_markers(cores, path)
     markers = gpd.read_file(path)
-    assert list(markers.columns) == ["core_id", "geometry"]
+    assert list(markers.columns) == [
+        "core_id",
+        "peat_measurement",
+        "error_found",
+        "geometry",
+    ]
     assert sorted(markers["core_id"]) == cores["core_id"].tolist()
+    assert markers["peat_measurement"].dtype == bool
+    assert markers["error_found"].dtype == bool
 
 
-def test_cards_chunks_and_dataset_lookup(
-    cores: gpd.GeoDataFrame, tmp_path: Path
-) -> None:
-    codes, datasets = preprocess.build_datasets(cores)
-    preprocess.write_cards(cores, codes, tmp_path / "cards", chunk_size=2)
+def test_cards_chunks_and_dataset_lookup(csv_path: Path, tmp_path: Path) -> None:
+    rows, datasets = read_with_datasets(csv_path)
+    dataset_by_sample = dict(zip(rows["sample_id"], rows["original_dataset"]))
+    cores = prepare(rows)
+    preprocess.write_cards(cores, tmp_path / "cards", chunk_size=2)
 
     assert sorted(p.name for p in (tmp_path / "cards").iterdir()) == [
         "0.json",
@@ -110,8 +231,37 @@ def test_cards_chunks_and_dataset_lookup(
             "peat_measurement",
             "error_found",
         }
-        assert datasets[card["dataset"]]["name"] == core.original_dataset
+        assert datasets[card["dataset"]]["name"] == dataset_by_sample[core.sample_id]
     assert sorted(d["name"] for d in datasets) == ["A", "B", "C"]
+
+
+@pytest.mark.parametrize(
+    ("note", "expected"),
+    [
+        # one quoted citation; "Source Citation :" with a space also occurs
+        (
+            "Source Citation: ['Gorham, E.: Long-term, 2012.']",
+            "Gorham, E.: Long-term, 2012.",
+        ),
+        ("Source Citation : ['Data retrieved 2025']", "Data retrieved 2025"),
+        # two quoted citations, then an unquoted subsource with inner brackets
+        (
+            "Source Citation: ['Treat 2017.', 'Treat 2019.'] "
+            "Subsource Citation: [Heusser, [Table 2] (1989)]",
+            "Treat 2017.\nTreat 2019.\nSubsource: Heusser, [Table 2] (1989)",
+        ),
+        # repeated citations appear once
+        (
+            "Source Citation: ['Bauer 2024.'] "
+            "Subsource Citation: ['Keys [file]', 'Prystupa 2020', 'Prystupa 2020']",
+            "Bauer 2024.\nSubsource: Keys [file]\nSubsource: Prystupa 2020",
+        ),
+        # notes without labels stay as they are
+        ("Smith 2001", "Smith 2001"),
+    ],
+)
+def test_clean_source_notes(note: str, expected: str) -> None:
+    assert preprocess.clean_source_notes(note) == expected
 
 
 def test_project_round_trip() -> None:

@@ -4,7 +4,8 @@ Outputs, under the output directory:
 
 - markers.fgb: core points with ``core_id`` and a FlatGeobuf spatial index
 - datasets.json: one entry per original dataset with its source notes
-- cards/<n>.json: card rows for cores ``n * CHUNK_SIZE`` and up
+- cards/<n>.json: card rows for cores ``n * CHUNK_SIZE`` and up, with
+  sample duplicates dropped and location group fields added
 - clusters_world.json: clusters (GeoJSON points with zoom and count) for
   zooms 0 to 2, the first page load
 - clusters.json: clusters in the same form for zooms 3 up to
@@ -14,8 +15,10 @@ Usage: python preprocess.py INPUT_CSV OUTPUT_DIR
 """
 
 import argparse
+import ast
 import json
 import logging
+import re
 from pathlib import Path
 from typing import NamedTuple
 
@@ -71,26 +74,132 @@ def read_cores(path: Path) -> gpd.GeoDataFrame:
     )
 
 
+def drop_sample_duplicates(rows: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
+    """Keep one representative row per ``sample_id``.
+
+    Sample duplicates are the same measurement ingested from two or more
+    datasets; they share a ``sample_id``. The representative is the row
+    with the most card fields filled (``depth_cm``, ``sample_date``,
+    ``site_condition``, where "Not provided" counts as blank); for ties,
+    the earliest citation year in
+    ``original_dataset`` wins, and datasets without a year come last.
+
+    Rows keep their input order. Each representative gets
+    ``also_reported_in``: ``[dataset, original_entry_num]`` for each row it
+    replaces, so a reader can look them up in the source release. Other
+    rows get ``None``. Expects the ``dataset`` index column.
+    """
+    card_fields = rows[["depth_cm", "sample_date", "site_condition"]].replace(
+        {"site_condition": {"Not provided": ""}}
+    )
+    filled = card_fields.ne("").sum(axis=1)
+    year = rows["original_dataset"].str.extract(r"\((\d{4})")[0].astype(float)
+    ranked = rows.assign(_filled=-filled, _year=year.fillna(np.inf)).sort_values(
+        ["sample_id", "_filled", "_year"], kind="stable"
+    )
+    is_first = ~ranked.duplicated("sample_id")
+    provenance: dict[str, list[list[int]]] = {}
+    for row in ranked[~is_first].itertuples():
+        provenance.setdefault(row.sample_id, []).append(
+            [int(row.dataset), int(row.original_entry_num)]
+        )
+    kept = rows.loc[ranked.index[is_first.to_numpy()].sort_values()].reset_index(
+        drop=True
+    )
+    kept["also_reported_in"] = [provenance.get(s) for s in kept["sample_id"]]
+    log.info(
+        f"Dropped {len(rows) - len(kept):,} sample duplicates from {len(rows):,} "
+        f"rows; {len(provenance):,} representatives; {len(kept):,} rows left"
+    )
+    return kept
+
+
 def sort_cores(cores: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
-    """Sort cores along a Hilbert curve and number them with ``core_id``."""
-    distance = cores.hilbert_distance()
-    order = np.argsort(distance.to_numpy(), kind="stable")
-    sorted_cores = cores.iloc[order].reset_index(drop=True)
+    """Sort cores along a Hilbert curve and number them with ``core_id``.
+
+    Ties in Hilbert distance sort by ``location_id``, so cores at the same
+    coordinates get consecutive ``core_id``s.
+    """
+    keys = pd.DataFrame(
+        {"distance": cores.hilbert_distance(), "location_id": cores["location_id"]}
+    )
+    order = keys.sort_values(["distance", "location_id"], kind="stable").index
+    sorted_cores = cores.loc[order].reset_index(drop=True)
     sorted_cores.insert(0, "core_id", np.arange(len(sorted_cores)))
     log.info(f"Sorted {len(sorted_cores):,} cores by Hilbert distance")
     return sorted_cores
 
 
-def keep_fields(cores: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
+def value_range(values: pd.Series) -> list | None:
+    """Return ``[min, max]`` of the values, or ``None`` if there are none."""
+    values = values.dropna()
+    if values.empty:
+        return None
+    return [values.min(), values.max()]
+
+
+def add_location_groups(cores: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
+    """Add location group fields to cores that share coordinates.
+
+    Location duplicates are different cores at the same coordinates; they
+    share a ``location_id``. Each core in a group of two or more gets
+    ``location_first`` (the group's first ``core_id``) and
+    ``location_count``. The group's first core also gets
+    ``location_summary``: its datasets and its ``depth_cm`` and
+    ``sample_date`` ranges. Cores alone at their location get ``None``.
+
+    Raises ``ValueError`` if a group's ``core_id``s are not consecutive,
+    which the web map's pager relies on.
+    """
+    groups = cores.groupby("location_id")["core_id"]
+    first = groups.transform("min")
+    count = groups.transform("size")
+    if ((groups.transform("max") - first + 1) != count).any():
+        raise ValueError("Location groups do not have consecutive core_ids")
+
+    shared = count > 1
+    cores = cores.copy()
+    # Object dtype keeps None; a plain list of ints and None becomes floats.
+    cores["location_first"] = pd.Series(
+        [int(f) if s else None for f, s in zip(first, shared, strict=True)],
+        index=cores.index,
+        dtype=object,
+    )
+    cores["location_count"] = pd.Series(
+        [int(c) if s else None for c, s in zip(count, shared, strict=True)],
+        index=cores.index,
+        dtype=object,
+    )
+    summaries: list[dict | None] = [None] * len(cores)
+    depth = pd.to_numeric(cores["depth_cm"], errors="coerce").astype(float)
+    dates = cores["sample_date"].where(cores["sample_date"] != "")
+    for _, group in cores[shared].groupby("location_id"):
+        summaries[int(group["core_id"].min())] = {
+            "datasets": sorted(int(d) for d in group["dataset"].unique()),
+            "depth_cm": value_range(depth[group.index]),
+            "sample_date": value_range(dates[group.index]),
+        }
+    cores["location_summary"] = summaries
+    group_count = cores.loc[shared, "location_id"].nunique()
+    log.info(
+        f"Kept {int(shared.sum()):,} location duplicates in {group_count:,} "
+        "location groups"
+    )
+    return cores
+
+
+def prune_fields(cores: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
     """Keep only fields the map draws with or the detail card shows.
 
     Drawing needs ``core_id``, the point, and ``error_found`` (error
     color). The card shows the rest, per the spec's "detail card should
-    show" list.
+    show" list, plus the duplicate fields from ``drop_sample_duplicates``
+    and ``add_location_groups``. ``dataset`` indexes datasets.json.
     """
     keep = [
         "core_id",
         "sample_id",
+        "dataset",
         "lat",
         "lon",
         "depth_cm",
@@ -98,8 +207,10 @@ def keep_fields(cores: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
         "site_condition",
         "peat_measurement",
         "error_found",
-        "original_dataset",
-        "original_dataset_source_notes",
+        "also_reported_in",
+        "location_first",
+        "location_count",
+        "location_summary",
         "geometry",
     ]
     log.info(f"Keep fields {','.join(keep)}, plus geometry")
@@ -107,22 +218,61 @@ def keep_fields(cores: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
 
 
 def write_markers(cores: gpd.GeoDataFrame, path: Path) -> None:
-    """Write core points with ``core_id`` and a spatial index."""
-    cores[["core_id", "geometry"]].to_file(
-        path, driver="FlatGeobuf", engine="pyogrio", SPATIAL_INDEX="YES"
+    """Write core points with a spatial index.
+
+    Each point has ``core_id``, plus ``peat_measurement`` and
+    ``error_found`` as booleans, which the map colors cores by.
+    """
+    markers = cores[["core_id", "geometry"]].assign(
+        peat_measurement=cores["peat_measurement"] == "True",
+        error_found=cores["error_found"] == "True",
     )
+    markers.to_file(path, driver="FlatGeobuf", engine="pyogrio", SPATIAL_INDEX="YES")
     log.info(f"Wrote {len(cores):,} markers to {path} ({size_text(path)})")
+
+
+def clean_source_notes(note: str) -> str:
+    """Turn raw source notes into one citation per line.
+
+    Notes read ``Source Citation: [...]``, optionally followed by
+    ``Subsource Citation: [...]`` parts. Each bracketed part is a Python
+    list of quoted citations, or one unquoted citation that may contain
+    brackets of its own. Subsource lines start with "Subsource: ".
+    Repeated citations appear once.
+    """
+    parts = re.split(r"\b(Source|Subsource) Citation\s*:\s*", note)
+    lines: list[str] = []
+    # re.split puts the text before the first label first, then alternates
+    # label and body.
+    for label, body in zip(parts[1::2], parts[2::2], strict=True):
+        body = body.strip()
+        try:
+            citations = ast.literal_eval(body)
+        except (ValueError, SyntaxError):
+            citations = None
+        if not isinstance(citations, list):
+            citations = [body.removeprefix("[").removesuffix("]")]
+        prefix = "Subsource: " if label == "Subsource" else ""
+        for citation in citations:
+            line = f"{prefix}{str(citation).strip()}"
+            if line not in lines:
+                lines.append(line)
+    return "\n".join(lines) if lines else note
 
 
 def build_datasets(cores: pd.DataFrame) -> tuple[np.ndarray, list[dict]]:
     """Return each core's dataset index and the list of datasets.
 
-    Each dataset keeps the source notes of its first core.
+    Each dataset keeps the source notes of its first core, cleaned by
+    ``clean_source_notes``. Run on all rows before
+    ``drop_sample_duplicates``, so datasets.json also lists the datasets
+    of dropped rows.
     """
     codes, names = pd.factorize(cores["original_dataset"])
     notes = cores.groupby(codes)["original_dataset_source_notes"].first()
     datasets = [
-        {"name": name, "source_notes": notes[i]} for i, name in enumerate(names)
+        {"name": name, "source_notes": clean_source_notes(notes[i])}
+        for i, name in enumerate(names)
     ]
     return codes, datasets
 
@@ -133,26 +283,23 @@ def write_json(data: object, path: Path) -> None:
         json.dump(data, f, separators=(",", ":"))
 
 
-def write_cards(
-    cores: pd.DataFrame, codes: np.ndarray, out_dir: Path, chunk_size: int
-) -> None:
+def write_cards(cores: pd.DataFrame, out_dir: Path, chunk_size: int) -> None:
     """Write card rows in chunks of ``chunk_size`` by ``core_id``.
 
     Card ``core_id`` sits at index ``core_id % chunk_size`` of chunk
-    ``core_id // chunk_size``. Each row holds ``dataset``, an index into
-    datasets.json, instead of the dataset columns.
+    ``core_id // chunk_size``. Fields set to ``None`` (duplicate fields of
+    cores without duplicates) are left out of the row.
     """
-    cards = cores.drop(
-        columns=["geometry", "original_dataset", "original_dataset_source_notes"]
-    )
-    cards.insert(1, "dataset", codes)
+    cards = cores.drop(columns=["geometry"])
     out_dir.mkdir(parents=True, exist_ok=True)
     chunk_count = 0
     for start in range(0, len(cards), chunk_size):
-        chunk = cards.iloc[start : start + chunk_size]
-        write_json(
-            chunk.to_dict(orient="records"), out_dir / f"{start // chunk_size}.json"
-        )
+        records = cards.iloc[start : start + chunk_size].to_dict(orient="records")
+        rows = [
+            {key: value for key, value in record.items() if value is not None}
+            for record in records
+        ]
+        write_json(rows, out_dir / f"{start // chunk_size}.json")
         chunk_count += 1
     log.info(f"Wrote {chunk_count} card chunks to {out_dir} ({size_text(out_dir)})")
 
@@ -385,16 +532,21 @@ def main() -> None:
     )
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
-    cores = keep_fields(sort_cores(read_cores(args.input_csv)))
-    write_markers(cores, args.output_dir / "markers.fgb")
-    codes, datasets = build_datasets(cores)
+    rows = read_cores(args.input_csv)
+    codes, datasets = build_datasets(rows)
+    rows["dataset"] = codes
     datasets_path = args.output_dir / "datasets.json"
     write_json(datasets, datasets_path)
     log.info(
         f"Wrote {len(datasets):,} datasets to {datasets_path} "
         f"({size_text(datasets_path)})"
     )
-    write_cards(cores, codes, args.output_dir / "cards", CHUNK_SIZE)
+    cores = drop_sample_duplicates(rows)
+    cores = sort_cores(cores)
+    cores = add_location_groups(cores)
+    cores = prune_fields(cores)
+    write_markers(cores, args.output_dir / "markers.fgb")
+    write_cards(cores, args.output_dir / "cards", CHUNK_SIZE)
     write_clusters(cores, args.output_dir, CLUSTER_MAX_ZOOM, CLUSTER_RADIUS_PX)
     log.info(f"Done: {args.output_dir} ({size_text(args.output_dir)})")
 
